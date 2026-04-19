@@ -2,74 +2,65 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
 import joblib
+import os
 
 app = Flask(__name__)
+CORS(app)
 
-# CORS: allow ONLY your frontend
-CORS(app, resources={
-    r"/api/*": {
-        "origins": ["http://localhost:5173"]
-    }
-})
+# Safe model loading
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load trained objects
-model = joblib.load("crop_gnb_model.pkl")
-label_encoder = joblib.load("label_encoder.pkl")
-scaler = joblib.load("scaler.pkl")
+try:
+    model = joblib.load(os.path.join(BASE_DIR, "crop_gnb_model.pkl"))
+    scaler = joblib.load(os.path.join(BASE_DIR, "scaler.pkl"))
+    label_encoder = joblib.load(os.path.join(BASE_DIR, "label_encoder.pkl"))
+except Exception as e:
+    print("Model loading error:", e)
+    model = None
 
 FEATURES = ["N", "P", "K", "temperature", "humidity", "ph", "rainfall"]
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return jsonify({
-        "status": "Running",
-        "service": "Crop Recommendation API"
-    })
+    return jsonify({"status": "API Running"})
 
-
-@app.route("/api/predict", methods=["POST", "OPTIONS"])
+@app.route("/predict", methods=["POST"])
 def predict():
 
-    # ✅ Handle CORS preflight FIRST
-    if request.method == "OPTIONS":
-        return ("", 204)
+    if model is None:
+        return jsonify({"error": "Model not loaded"}), 500
 
-    # ⬇️ POST starts here
     data = request.get_json(silent=True)
 
     if not data:
-        return jsonify({"error": "No JSON body provided"}), 400
+        return jsonify({"error": "No JSON provided"}), 400
 
-    for feature in FEATURES:
-        if feature not in data:
-            return jsonify({"error": f"Missing field: {feature}"}), 400
+    # Validate input
+    for f in FEATURES:
+        if f not in data:
+            return jsonify({"error": f"Missing field: {f}"}), 400
 
-    values = [
-        data["N"], data["P"], data["K"],
-        data["temperature"], data["humidity"],
-        data["ph"], data["rainfall"]
-    ]
+    try:
+        values = [float(data[f]) for f in FEATURES]
 
-    input_data = np.array(values).reshape(1, -1)
-    input_scaled = scaler.transform(input_data)
+        input_data = np.array(values).reshape(1, -1)
+        input_scaled = scaler.transform(input_data)
 
-    prediction = model.predict(input_scaled)[0]
-    probabilities = model.predict_proba(input_scaled)[0]
+        probs = model.predict_proba(input_scaled)[0]
+        top3_idx = np.argsort(probs)[-3:][::-1]
 
-    crop_name = label_encoder.inverse_transform([prediction])[0]
+        crops = label_encoder.inverse_transform(top3_idx)
 
-    return jsonify({
-        "recommended_crop": crop_name,
-        "confidence_percent": round(probabilities[prediction] * 100, 2)
-    })
+        return jsonify({
+            "crop1": crops[0],
+            "crop2": crops[1],
+            "crop3": crops[2]
+        })
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(
-        host="localhost",
-        port=5000,
-        debug=True,
-        use_reloader=False
-    )
-
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
